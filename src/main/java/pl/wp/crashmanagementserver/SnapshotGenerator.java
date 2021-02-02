@@ -210,7 +210,8 @@ public class SnapshotGenerator {
 					.setPortValue(port)
 					.setProtocol(SocketAddress.Protocol.UDP)
 				)
-			);
+			)
+			.setReusePort(true);
 
 		return listenerBuilder.build();
 	}
