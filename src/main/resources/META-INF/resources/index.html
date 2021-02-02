@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<title>Crash Management Server</title>
+		<script>
+function trigger() {
+  var xhttp = new XMLHttpRequest();
+  xhttp.open("POST", "triggerChange", true);
+  xhttp.send();
+}
+		</script>
+	</head>
+	<body>
+		<h1>Crash Management Server</h1>
+		<div>Press this button to trigger change in CDS. This should crash envoy on first few tries.</div>
+		<button onclick="trigger(); return false;">Trigger</button>
+	</body>
+</html>
+

@@ -1,5 +1,6 @@
 package pl.wp.crashmanagementserver;
 
+import com.google.protobuf.Any;
 import com.google.protobuf.Duration;
 import com.google.protobuf.UInt32Value;
 import io.envoyproxy.envoy.config.cluster.v3.CircuitBreakers;
@@ -19,7 +20,9 @@ import io.envoyproxy.envoy.config.endpoint.v3.Endpoint;
 import io.envoyproxy.envoy.config.endpoint.v3.LbEndpoint;
 import io.envoyproxy.envoy.config.endpoint.v3.LocalityLbEndpoints;
 import io.envoyproxy.envoy.config.listener.v3.Listener;
+import io.envoyproxy.envoy.config.listener.v3.ListenerFilter;
 import io.envoyproxy.envoy.config.route.v3.RouteConfiguration;
+import io.envoyproxy.envoy.extensions.filters.udp.udp_proxy.v3.UdpProxyConfig;
 import io.envoyproxy.envoy.extensions.transport_sockets.tls.v3.Secret;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -40,45 +43,48 @@ public class SnapshotGenerator {
 
 	private final AtomicLong cdsVersion = new AtomicLong(1L);
 
-	@Value("${clusters.count:2}")
+	@Value("${clusters.count:1}")
 	private int numberOfClusters;
 
-	@Value("${clusters.endoint.ip:127.0.0.1}")
+	@Value("${clusters.endpoint.ip:127.0.0.1}")
 	private String endpointIp;
 
-	@Value("${clusters.endoint.ip:3333}")
+	@Value("${clusters.endpoint.port:3333}")
 	private int endpointPort;
+
+	@Value("${clusters.udp.listener.portBase:20000}")
+	private int udpPortBase;
 
 	private long connectTimeout = 1L;
 
 	private List<Cluster> cds;
 	private List<ClusterLoadAssignment> eds;
-	private final List<Listener> lds = Collections.EMPTY_LIST;
-	private final List<RouteConfiguration> rds = Collections.EMPTY_LIST;
+	private List<Listener> lds;
+	private List<RouteConfiguration> rds;
 	private final List<Secret> sds = Collections.EMPTY_LIST;
 
 	@PostConstruct
 	private void init() {
-		eds = generateEds();
-		cds = generateCds();
-
+		rds = generateRds();
+		generate();
 		publish();
 	}
 
-	public void changeCds() {
+	public void triggerChange() {
+		log.info("Triggering change in CDS");
 		++connectTimeout;
-		cds = generateCds();
+		generate();
 		publish();
 	}
 
 	private void publish() {
-		long version = cdsVersion.incrementAndGet();
+		String version = Long.toString(cdsVersion.incrementAndGet());
 
 		try {
-			server.publishSnapshot(cds, Long.toString(version),
-				eds, Long.toString(version),
-				lds, "1",
-				rds, "1",
+			server.publishSnapshot(cds, version,
+				eds, version,
+				lds, version,
+				rds, version,
 				sds, "1");
 		} catch (IOException ex) {
 			log.error("Error in publishing snapshot", ex);
@@ -89,22 +95,31 @@ public class SnapshotGenerator {
 		return "cluster-" + id;
 	}
 
-	private List<ClusterLoadAssignment> generateEds() {
+	private void generate() {
+		List<Cluster> clusters = new ArrayList<>(numberOfClusters);
 		List<ClusterLoadAssignment> clas = new ArrayList<>(numberOfClusters);
+		List<Listener> listeners = new ArrayList<>();
 		for (int id = 1; id <= numberOfClusters; ++id) {
-			clas.add(createClusterLoadAssigment(id));
+			final String clusterName = makeClusterName(id);
+			boolean udp = (id % 10 == 1);
+
+			if (udp) {
+				listeners.add(createUdpListener(clusterName, udpPortBase + id));
+			}
+			clas.add(createClusterLoadAssigment(clusterName, udp));
+			clusters.add(createCluster(clusterName));
 		}
-		return clas;
+
+		eds = clas;
+		cds = clusters;
+		lds = listeners;
 	}
 
-	private ClusterLoadAssignment createClusterLoadAssigment(int id) {
-		final String clusterName = makeClusterName(id);
-
+	private ClusterLoadAssignment createClusterLoadAssigment(String clusterName, boolean udp) {
 		final ClusterLoadAssignment.Builder edsBuilder = ClusterLoadAssignment.newBuilder()
 			.setClusterName(clusterName);
 
-		SocketAddress.Protocol protocol = (id % 10 == 1) ? SocketAddress.Protocol.UDP: SocketAddress.Protocol.TCP;
-		log.info("cluster {}, protocol {}", clusterName, protocol);
+		SocketAddress.Protocol protocol = udp ? SocketAddress.Protocol.UDP: SocketAddress.Protocol.TCP;
 
 		final Endpoint.Builder endpointBuilder = Endpoint.newBuilder()
 			.setAddress(Address.newBuilder()
@@ -129,17 +144,7 @@ public class SnapshotGenerator {
 		return edsBuilder.build();
 	}
 
-	private List<Cluster> generateCds() {
-		List<Cluster> clusters = new ArrayList<>(numberOfClusters);
-		for (int id = 1; id <= numberOfClusters; ++id) {
-			clusters.add(createCluster(id));
-		}
-		return clusters;
-	}
-
-	private Cluster createCluster(int id) {
-		final String clusterName = makeClusterName(id);
-
+	private Cluster createCluster(String clusterName) {
 		final Cluster.Builder clusterBuilder = Cluster.newBuilder();
 		clusterBuilder.setName(clusterName)
 		.setAltStatName(clusterName)
@@ -178,5 +183,35 @@ public class SnapshotGenerator {
 			.setIgnoreHealthOnHostRemoval(true);
 
 		return clusterBuilder.build();
+	}
+
+	private List<RouteConfiguration> generateRds() {
+		RouteConfiguration.Builder routeConfigurationBuilder = RouteConfiguration.newBuilder();
+		routeConfigurationBuilder.setName("auto-virtual-hosts");
+
+		return Collections.singletonList(routeConfigurationBuilder.build());
+	}
+
+	private Listener createUdpListener(String clusterName, int port) {
+		UdpProxyConfig.Builder proxyBuilder = UdpProxyConfig.newBuilder();
+		proxyBuilder
+			.setStatPrefix(clusterName)
+			.setCluster(clusterName);
+
+		Listener.Builder listenerBuilder = Listener.newBuilder();
+		listenerBuilder.setName(clusterName)
+			.addListenerFilters(ListenerFilter.newBuilder()
+				.setName("envoy.filters.udp_listener.udp_proxy")
+				.setTypedConfig(Any.pack(proxyBuilder.build()))
+			)
+			.setAddress(Address.newBuilder()
+				.setSocketAddress(SocketAddress.newBuilder()
+					.setAddress("0.0.0.0")
+					.setPortValue(port)
+					.setProtocol(SocketAddress.Protocol.UDP)
+				)
+			);
+
+		return listenerBuilder.build();
 	}
 }

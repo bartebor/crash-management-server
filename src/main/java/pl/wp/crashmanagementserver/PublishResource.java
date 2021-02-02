@@ -12,8 +12,8 @@ public class PublishResource {
 	@Autowired
 	private SnapshotGenerator snapshotGenerator;
 
-	@RequestMapping(path = "/changeCds", method = RequestMethod.POST)
-	void changeCds() {
-		snapshotGenerator.changeCds();
+	@RequestMapping(path = "/triggerChange", method = RequestMethod.POST)
+	void triggerChange() {
+		snapshotGenerator.triggerChange();
 	}
 }
